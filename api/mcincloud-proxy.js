@@ -1,4 +1,7 @@
 // /api/mcincloud-proxy.js
+// Stuurt FLAT schema naar MCInCloud (geconfirmed werkend).
+// Geen additionalData. leadId gaat als queryparam mee in statusCallbackUrl.
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
@@ -6,7 +9,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Tolerant body parsing (JSON of x-www-form-urlencoded)
+    // Body tolerant parsen (JSON of x-www-form-urlencoded)
     const rawCT = req.headers['content-type'] || '';
     const body = typeof req.body === 'string'
       ? (rawCT.includes('application/x-www-form-urlencoded')
@@ -19,18 +22,11 @@ export default async function handler(req, res) {
       phone1,
       statusCallbackUrl,
       statusCallbackMethod,
-      additionalData,
-      leadId,
-      ...rest
+      leadId,                 // vanuit Databowl
+      // overige velden negeren
     } = body;
 
-    // Query switches
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const debug = url.searchParams.get('debug') === '1' || process.env.DEBUG === '1';
-    const noad = url.searchParams.get('noad') === '1';
-    const schema = (url.searchParams.get('schema') || 'wrapped').toLowerCase(); // 'wrapped' | 'flat'
-
-    // 1) Normalize phone → E.164 (+31…)
+    // 1) Telefoon normaliseren → E.164 (NL default)
     const normalizePhone = (val) => {
       if (!val) return val;
       let s = String(val).trim().replace(/[\s\-.]/g, '');
@@ -40,34 +36,18 @@ export default async function handler(req, res) {
       if (!s.startsWith('+')) s = '+' + s;
       return s;
     };
-    const phone = normalizePhone(customerPhoneNumber || phone1 || rest.phone || null);
+    const phone = normalizePhone(customerPhoneNumber || phone1 || null);
 
     // 2) Callback & method
     const host = req.headers.host;
-    const fallbackCb = `https://${host}/api/mcincloud-status`;
-    const cbUrl = (statusCallbackUrl || process.env.MCINCLOUD_STATUS_CALLBACK_URL || fallbackCb);
-    const cbMethod = (statusCallbackMethod || 'POST').toUpperCase();
-
-    // 3) additionalData → object or null; force leadId to string
-    let addData = null;
-    if (!noad) {
-      if (additionalData === null || additionalData === undefined || additionalData === '') {
-        addData = null;
-      } else if (typeof additionalData === 'object') {
-        addData = additionalData;
-      } else if (typeof additionalData === 'string') {
-        try {
-          const parsed = JSON.parse(additionalData);
-          addData = (parsed && typeof parsed === 'object') ? parsed : { raw: String(additionalData) };
-        } catch {
-          addData = { raw: String(additionalData) };
-        }
-      }
-      if (leadId !== undefined && leadId !== null) {
-        addData = addData || {};
-        addData.leadId = String(leadId); // ← belangrijk: string
-      }
+    const baseCb = (process.env.MCINCLOUD_STATUS_CALLBACK_URL || `https://${host}/api/mcincloud-status`);
+    // Neem expliciet mee als queryparam (stringen!)
+    const urlObj = new URL(statusCallbackUrl || baseCb);
+    if (leadId !== undefined && leadId !== null && String(leadId).trim() !== '') {
+      urlObj.searchParams.set('leadId', String(leadId));
     }
+    const cbUrl = urlObj.toString();
+    const cbMethod = (statusCallbackMethod || 'POST').toUpperCase();
 
     // Validaties
     if (!phone || !phone.startsWith('+')) {
@@ -77,28 +57,19 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'statusCallbackUrl moet absolute http(s) zijn.' });
     }
 
-    // 4) Payload volgens gekozen schema
-    let outbound;
-    if (schema === 'flat') {
-      outbound = {
-        customerPhoneNumber: phone,
-        statusCallbackUrl: cbUrl,
-        statusCallbackMethod: cbMethod,
-        ...(addData === null ? {} : { additionalData: addData })
-      };
-    } else {
-      // wrapped (default)
-      outbound = {
-        callDetails: { customerPhoneNumber: phone },
-        statusCallbackUrl: cbUrl,
-        statusCallbackMethod: cbMethod,
-        ...(addData === null ? {} : { additionalData: addData })
-      };
-    }
+    // 3) Definitieve payload: FLAT schema (geen additionalData)
+    const outbound = {
+      customerPhoneNumber: phone,
+      statusCallbackUrl: cbUrl,
+      statusCallbackMethod: cbMethod
+    };
 
+    // Debug toggle
+    const url = new URL(req.url, `https://${host}`);
+    const debug = url.searchParams.get('debug') === '1' || process.env.DEBUG === '1';
     if (debug) console.log('PROXY outbound → MCInCloud:', JSON.stringify(outbound));
 
-    // 5) Post naar MCInCloud
+    // 4) Post naar MCInCloud
     const r = await fetch('https://api.dev.mcincloud.com/api/v2/calls/enriched', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -108,7 +79,6 @@ export default async function handler(req, res) {
     const text = await r.text();
     if (debug) console.log('MCInCloud response:', r.status, text);
 
-    // Return zo veel mogelijk transparant
     try { return res.status(r.status).json(JSON.parse(text)); }
     catch { return res.status(r.status).send(text || ''); }
 
