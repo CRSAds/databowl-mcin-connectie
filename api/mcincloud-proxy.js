@@ -24,14 +24,20 @@ export default async function handler(req, res) {
       ...rest
     } = body;
 
-    // 1) Telefoon normaliseren → E.164 (NL default)
+    // Query switches
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const debug = url.searchParams.get('debug') === '1' || process.env.DEBUG === '1';
+    const noad = url.searchParams.get('noad') === '1';
+    const schema = (url.searchParams.get('schema') || 'wrapped').toLowerCase(); // 'wrapped' | 'flat'
+
+    // 1) Normalize phone → E.164 (+31…)
     const normalizePhone = (val) => {
       if (!val) return val;
       let s = String(val).trim().replace(/[\s\-.]/g, '');
       if (s.startsWith('0031')) s = '+' + s.slice(2);
       if (/^31\d+$/.test(s)) s = '+' + s;
       if (/^0\d{9,10}$/.test(s)) s = '+31' + s.slice(1);
-      if (!s.startsWith('+')) s = '+' + s; // fallback
+      if (!s.startsWith('+')) s = '+' + s;
       return s;
     };
     const phone = normalizePhone(customerPhoneNumber || phone1 || rest.phone || null);
@@ -42,55 +48,57 @@ export default async function handler(req, res) {
     const cbUrl = (statusCallbackUrl || process.env.MCINCLOUD_STATUS_CALLBACK_URL || fallbackCb);
     const cbMethod = (statusCallbackMethod || 'POST').toUpperCase();
 
-    // 3) additionalData → object of null; leadId altijd als string
+    // 3) additionalData → object or null; force leadId to string
     let addData = null;
-    if (additionalData === null || additionalData === undefined || additionalData === '') {
-      addData = null;
-    } else if (typeof additionalData === 'object') {
-      addData = additionalData;
-    } else if (typeof additionalData === 'string') {
-      try {
-        const parsed = JSON.parse(additionalData);
-        addData = (parsed && typeof parsed === 'object') ? parsed : { raw: String(additionalData) };
-      } catch {
-        addData = { raw: String(additionalData) };
+    if (!noad) {
+      if (additionalData === null || additionalData === undefined || additionalData === '') {
+        addData = null;
+      } else if (typeof additionalData === 'object') {
+        addData = additionalData;
+      } else if (typeof additionalData === 'string') {
+        try {
+          const parsed = JSON.parse(additionalData);
+          addData = (parsed && typeof parsed === 'object') ? parsed : { raw: String(additionalData) };
+        } catch {
+          addData = { raw: String(additionalData) };
+        }
+      }
+      if (leadId !== undefined && leadId !== null) {
+        addData = addData || {};
+        addData.leadId = String(leadId); // ← belangrijk: string
       }
     }
-    if (leadId !== undefined && leadId !== null) {
-      addData = addData || {};
-      addData.leadId = String(leadId); // <-- forceer string
-    }
 
-    // 4) Validaties
+    // Validaties
     if (!phone || !phone.startsWith('+')) {
       return res.status(400).json({ error: 'customerPhoneNumber ontbreekt of is ongeldig (E.164 met +).' });
     }
     if (!/^https?:\/\//i.test(cbUrl)) {
-      return res.status(400).json({ error: 'statusCallbackUrl moet een absolute http(s) URL zijn.' });
+      return res.status(400).json({ error: 'statusCallbackUrl moet absolute http(s) zijn.' });
     }
 
-    // 5) Definitieve payload: ALTIJD callDetails-schema
-    const outbound = {
-      callDetails: { customerPhoneNumber: phone },
-      statusCallbackUrl: cbUrl,
-      statusCallbackMethod: cbMethod,
-      ...(addData === null ? {} : { additionalData: addData })
-    };
-
-    // --- Debug / Dry-run helpers ---
-    const url = new URL(req.url, `https://${host}`);
-    const debug = url.searchParams.get('debug') === '1' || process.env.DEBUG === '1';
-    const dry = url.searchParams.get('dry') === '1';
-
-    if (debug) {
-      console.log('PROXY outbound → MCInCloud:', JSON.stringify(outbound));
+    // 4) Payload volgens gekozen schema
+    let outbound;
+    if (schema === 'flat') {
+      outbound = {
+        customerPhoneNumber: phone,
+        statusCallbackUrl: cbUrl,
+        statusCallbackMethod: cbMethod,
+        ...(addData === null ? {} : { additionalData: addData })
+      };
+    } else {
+      // wrapped (default)
+      outbound = {
+        callDetails: { customerPhoneNumber: phone },
+        statusCallbackUrl: cbUrl,
+        statusCallbackMethod: cbMethod,
+        ...(addData === null ? {} : { additionalData: addData })
+      };
     }
-    if (dry) {
-      return res.status(200).json({ ok: true, mode: 'dry-run', outbound });
-    }
-    // -------------------------------
 
-    // 6) Doorposten naar MCInCloud
+    if (debug) console.log('PROXY outbound → MCInCloud:', JSON.stringify(outbound));
+
+    // 5) Post naar MCInCloud
     const r = await fetch('https://api.dev.mcincloud.com/api/v2/calls/enriched', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -98,6 +106,9 @@ export default async function handler(req, res) {
     });
 
     const text = await r.text();
+    if (debug) console.log('MCInCloud response:', r.status, text);
+
+    // Return zo veel mogelijk transparant
     try { return res.status(r.status).json(JSON.parse(text)); }
     catch { return res.status(r.status).send(text || ''); }
 
