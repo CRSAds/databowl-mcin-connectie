@@ -1,24 +1,31 @@
 // /api/mcincloud-status.js
+// Ontvangt MCInCloud callback (JSON).
+// Haalt leadId uit query (?leadId=...) of uit body.additionalData/leadId.
+// Post status naar Databowl als application/x-www-form-urlencoded met Content-Length + Host.
+
 export default async function handler(req, res) {
   try {
-    const rawCT = req.headers['content-type'] || '';
-    const body = typeof req.body === 'string'
-      ? JSON.parse(req.body || '{}')
-      : (req.body || {});
+    // Body (MCInCloud) is JSON: { timestamp, status, callId, additionalData? }
+    const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : (req.body || {});
     const { timestamp, status, callId, additionalData } = body;
 
-    // leadId terughalen
-    const leadId =
-      (additionalData && (additionalData.leadId ?? additionalData.leadID ?? additionalData.lead_id)) ??
-      body.leadId ?? null;
+    // leadId voorkeur: queryparam > additionalData > body.leadId
+    const url = new URL(req.url, `https://${req.headers.host}`);
+    const leadIdFromQuery = url.searchParams.get('leadId');
+    const leadIdFromAdd =
+      additionalData && (additionalData.leadId ?? additionalData.leadID ?? additionalData.lead_id);
+    const leadId = leadIdFromQuery || (leadIdFromAdd ? String(leadIdFromAdd) : null) || (body.leadId ? String(body.leadId) : null);
 
+    // Bouw statuswaarde
     const statusValue = [ status || 'unknown', callId ? `callId=${callId}` : null, timestamp || null ]
       .filter(Boolean).join(' | ');
 
+    // Databowl config
     const DATABOWL_URL = process.env.DATABOWL_URL || 'https://crsadvertising.databowl.com/api/v1/lead';
     const CID = process.env.DATABOWL_CID || '5314';
     const SID = process.env.DATABOWL_SID || '34';
 
+    // Form body
     const formObj = {
       cid: String(CID),
       sid: String(SID),
@@ -28,7 +35,6 @@ export default async function handler(req, res) {
 
     const bodyStr = new URLSearchParams(formObj).toString();
 
-    // Verplichte headers voor Databowl
     const headers = {
       'Content-Type': 'application/x-www-form-urlencoded',
       'Content-Length': Buffer.byteLength(bodyStr).toString(),
@@ -38,7 +44,7 @@ export default async function handler(req, res) {
     const r = await fetch(DATABOWL_URL, { method: 'POST', headers, body: bodyStr });
     const respText = await r.text();
 
-    const url = new URL(req.url, `https://${req.headers.host}`);
+    // Debug?
     const debug = url.searchParams.get('debug') === '1' || process.env.DEBUG === '1';
     if (debug) {
       console.log('STATUS → Databowl form:', bodyStr);
