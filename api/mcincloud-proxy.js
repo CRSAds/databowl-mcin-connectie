@@ -1,6 +1,6 @@
 // /api/mcincloud-proxy.js
-// Stuurt FLAT schema naar MCInCloud (geconfirmed werkend).
-// Geen additionalData. leadId gaat als queryparam mee in statusCallbackUrl.
+// Flat schema naar MCInCloud. Geen additionalData.
+// leadId (DB ID) + leadUid (DB UID) gaan mee als queryparams in statusCallbackUrl.
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -22,11 +22,11 @@ export default async function handler(req, res) {
       phone1,
       statusCallbackUrl,
       statusCallbackMethod,
-      leadId,                 // vanuit Databowl
-      // overige velden negeren
+      leadId,   // Databowl Lead ID (numeriek)
+      leadUid,  // Databowl Lead UID (string/nummer)
     } = body;
 
-    // 1) Telefoon normaliseren → E.164 (NL default)
+    // 1) Telefoon -> E.164 (+31…)
     const normalizePhone = (val) => {
       if (!val) return val;
       let s = String(val).trim().replace(/[\s\-.]/g, '');
@@ -40,13 +40,12 @@ export default async function handler(req, res) {
 
     // 2) Callback & method
     const host = req.headers.host;
-    const baseCb = (process.env.MCINCLOUD_STATUS_CALLBACK_URL || `https://${host}/api/mcincloud-status`);
-    // Neem expliciet mee als queryparam (stringen!)
-    const urlObj = new URL(statusCallbackUrl || baseCb);
-    if (leadId !== undefined && leadId !== null && String(leadId).trim() !== '') {
-      urlObj.searchParams.set('leadId', String(leadId));
-    }
-    const cbUrl = urlObj.toString();
+    const baseCb = process.env.MCINCLOUD_STATUS_CALLBACK_URL || `https://${host}/api/mcincloud-status`;
+    const cbUrlObj = new URL(statusCallbackUrl || baseCb);
+    if (leadId  != null && String(leadId).trim()  !== '') cbUrlObj.searchParams.set('leadId',  String(leadId));
+    if (leadUid != null && String(leadUid).trim() !== '') cbUrlObj.searchParams.set('leadUid', String(leadUid));
+    const cbUrl = cbUrlObj.toString();
+
     const cbMethod = (statusCallbackMethod || 'POST').toUpperCase();
 
     // Validaties
@@ -57,7 +56,7 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'statusCallbackUrl moet absolute http(s) zijn.' });
     }
 
-    // 3) Definitieve payload: FLAT schema (geen additionalData)
+    // 3) Flat payload (bewezen werkend op jouw cluster)
     const outbound = {
       customerPhoneNumber: phone,
       statusCallbackUrl: cbUrl,
