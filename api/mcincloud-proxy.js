@@ -1,6 +1,11 @@
 // /api/mcincloud-proxy.js
-// Flat schema naar MCInCloud. Geen additionalData.
-// leadId (DB ID) + leadUid (DB UID) gaan mee als queryparams in statusCallbackUrl.
+// Doel: Flat schema naar MCInCloud sturen (bewezen werkend) en identifiers
+// (leadId/leadUid) zowel in de callback-URL als in additionalData meesturen,
+// zodat de status-callback ze altijd terugstuurt.
+//
+// Query toggles:
+//  - ?debug=1  → extra logging naar Vercel logs
+//  - ?dry=1    → geen externe call; geeft de outbound payload terug (voor testen)
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -17,16 +22,18 @@ export default async function handler(req, res) {
           : JSON.parse(req.body || '{}'))
       : (req.body || {});
 
+    // Inkomende velden vanuit Databowl
     let {
       customerPhoneNumber,
-      phone1,
+      phone1,                    // soms zo genoemd
       statusCallbackUrl,
       statusCallbackMethod,
-      leadId,   // Databowl Lead ID (numeriek)
-      leadUid,  // Databowl Lead UID (string/nummer)
+      // identifiers (LET OP: Forwarding moet Lead ID/UID mappen naar deze namen)
+      leadId,                    // numerieke Databowl Lead ID
+      leadUid                    // Databowl Lead UID
     } = body;
 
-    // 1) Telefoon -> E.164 (+31…)
+    // 1) Telefoon normaliseren naar E.164 (NL default)
     const normalizePhone = (val) => {
       if (!val) return val;
       let s = String(val).trim().replace(/[\s\-.]/g, '');
@@ -38,7 +45,7 @@ export default async function handler(req, res) {
     };
     const phone = normalizePhone(customerPhoneNumber || phone1 || null);
 
-    // 2) Callback & method
+    // 2) Callback-URL opbouwen (inclusief leadId/leadUid in query)
     const host = req.headers.host;
     const baseCb = process.env.MCINCLOUD_STATUS_CALLBACK_URL || `https://${host}/api/mcincloud-status`;
     const cbUrlObj = new URL(statusCallbackUrl || baseCb);
@@ -48,7 +55,7 @@ export default async function handler(req, res) {
 
     const cbMethod = (statusCallbackMethod || 'POST').toUpperCase();
 
-    // Validaties
+    // 3) Validaties
     if (!phone || !phone.startsWith('+')) {
       return res.status(400).json({ error: 'customerPhoneNumber ontbreekt of is ongeldig (E.164 met +).' });
     }
@@ -56,19 +63,33 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'statusCallbackUrl moet absolute http(s) zijn.' });
     }
 
-    // 3) Flat payload (bewezen werkend op jouw cluster)
+    // 4) Identifiers ook als additionalData meesturen (vangnet)
+    const addData = {};
+    if (leadId  != null && String(leadId).trim()  !== '') addData.leadId  = String(leadId);
+    if (leadUid != null && String(leadUid).trim() !== '') addData.leadUid = String(leadUid);
+
+    // 5) Definitieve payload: flat schema
     const outbound = {
       customerPhoneNumber: phone,
       statusCallbackUrl: cbUrl,
-      statusCallbackMethod: cbMethod
+      statusCallbackMethod: cbMethod,
+      ...(Object.keys(addData).length ? { additionalData: addData } : {})
     };
 
-    // Debug toggle
-    const url = new URL(req.url, `https://${host}`);
-    const debug = url.searchParams.get('debug') === '1' || process.env.DEBUG === '1';
-    if (debug) console.log('PROXY outbound → MCInCloud:', JSON.stringify(outbound));
+    // Query toggles
+    const reqUrl = new URL(req.url, `https://${host}`);
+    const debug = reqUrl.searchParams.get('debug') === '1' || process.env.DEBUG === '1';
+    const dry   = reqUrl.searchParams.get('dry') === '1';
 
-    // 4) Post naar MCInCloud
+    if (debug) {
+      console.log('INBOUND body from Databowl:', JSON.stringify(body));
+      console.log('PROXY outbound → MCInCloud:', JSON.stringify(outbound));
+    }
+
+    // 6) Dry-run (geen externe call)
+    if (dry) return res.status(200).json({ ok: true, mode: 'dry-run', outbound });
+
+    // 7) Post naar MCInCloud
     const r = await fetch('https://api.dev.mcincloud.com/api/v2/calls/enriched', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
@@ -78,10 +99,12 @@ export default async function handler(req, res) {
     const text = await r.text();
     if (debug) console.log('MCInCloud response:', r.status, text);
 
+    // transparante doorzetting van response
     try { return res.status(r.status).json(JSON.parse(text)); }
     catch { return res.status(r.status).send(text || ''); }
 
   } catch (err) {
+    console.error('mcincloud-proxy error:', err);
     return res.status(500).json({ error: String(err?.message || err) });
   }
 }
