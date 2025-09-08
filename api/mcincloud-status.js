@@ -29,6 +29,7 @@ export default async function handler(req, res) {
     const formObj = {
       cid: String(CID),
       sid: String(SID),
+      uid: leadId, // uit ?leadId=...
       f_2608_Ai_Agent_Status: statusValue
     };
     if (leadId) formObj.id = String(leadId); // update specifiek lead
