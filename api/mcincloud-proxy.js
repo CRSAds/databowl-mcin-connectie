@@ -1,7 +1,4 @@
-// /pages/api/mcincloud-proxy.js
-// Post naar MCInCloud met verplicht callDetails-schema.
-// additionalData.leadId wordt altijd als string gezet als 'leadId' is meegegeven.
-
+// /api/mcincloud-proxy.js
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     res.setHeader('Allow', 'POST');
@@ -9,11 +6,12 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Tolerant parsen (JSON of x-www-form-urlencoded)
+    // Tolerant body parsing (JSON of x-www-form-urlencoded)
+    const rawCT = req.headers['content-type'] || '';
     const body = typeof req.body === 'string'
-      ? (req.headers['content-type'] || '').includes('application/x-www-form-urlencoded')
-        ? Object.fromEntries(new URLSearchParams(req.body))
-        : JSON.parse(req.body || '{}')
+      ? (rawCT.includes('application/x-www-form-urlencoded')
+          ? Object.fromEntries(new URLSearchParams(req.body))
+          : JSON.parse(req.body || '{}'))
       : (req.body || {});
 
     let {
@@ -22,18 +20,18 @@ export default async function handler(req, res) {
       statusCallbackUrl,
       statusCallbackMethod,
       additionalData,
-      leadId,                // vanuit Databowl
+      leadId,
       ...rest
     } = body;
 
-    // 1) Telefoon normaliseren -> E.164 (NL default)
+    // 1) Telefoon normaliseren → E.164 (NL default)
     const normalizePhone = (val) => {
       if (!val) return val;
       let s = String(val).trim().replace(/[\s\-.]/g, '');
       if (s.startsWith('0031')) s = '+' + s.slice(2);
       if (/^31\d+$/.test(s)) s = '+' + s;
       if (/^0\d{9,10}$/.test(s)) s = '+31' + s.slice(1);
-      if (!s.startsWith('+')) s = '+' + s;
+      if (!s.startsWith('+')) s = '+' + s; // fallback
       return s;
     };
     const phone = normalizePhone(customerPhoneNumber || phone1 || rest.phone || null);
@@ -44,7 +42,7 @@ export default async function handler(req, res) {
     const cbUrl = (statusCallbackUrl || process.env.MCINCLOUD_STATUS_CALLBACK_URL || fallbackCb);
     const cbMethod = (statusCallbackMethod || 'POST').toUpperCase();
 
-    // 3) additionalData -> object of null; leadId altijd string
+    // 3) additionalData → object of null; leadId altijd als string
     let addData = null;
     if (additionalData === null || additionalData === undefined || additionalData === '') {
       addData = null;
@@ -60,19 +58,18 @@ export default async function handler(req, res) {
     }
     if (leadId !== undefined && leadId !== null) {
       addData = addData || {};
-      // >>> cruciaal: als string pushen
-      addData.leadId = String(leadId);
+      addData.leadId = String(leadId); // <-- forceer string
     }
 
-    // Validaties
+    // 4) Validaties
     if (!phone || !phone.startsWith('+')) {
-      return res.status(400).json({ error: 'customerPhoneNumber ontbreekt of is ongeldig (verwacht E.164 met +).' });
+      return res.status(400).json({ error: 'customerPhoneNumber ontbreekt of is ongeldig (E.164 met +).' });
     }
     if (!/^https?:\/\//i.test(cbUrl)) {
       return res.status(400).json({ error: 'statusCallbackUrl moet een absolute http(s) URL zijn.' });
     }
 
-    // 4) Payload: ALTIJD callDetails-schema (past bij jouw 400)
+    // 5) Definitieve payload: ALTIJD callDetails-schema
     const outbound = {
       callDetails: { customerPhoneNumber: phone },
       statusCallbackUrl: cbUrl,
@@ -80,32 +77,29 @@ export default async function handler(req, res) {
       ...(addData === null ? {} : { additionalData: addData })
     };
 
-    // Optionele debug (zet DEBUG=1 als query of env voor echo)
-    const debug = (req.query && req.query.debug === '1') || process.env.DEBUG === '1';
-    if (debug) {
-      console.log('MC payload (wrapped):', JSON.stringify(outbound));
-    }
+    // --- Debug / Dry-run helpers ---
+    const url = new URL(req.url, `https://${host}`);
+    const debug = url.searchParams.get('debug') === '1' || process.env.DEBUG === '1';
+    const dry = url.searchParams.get('dry') === '1';
 
-    // 5) Doorposten naar MCInCloud
+    if (debug) {
+      console.log('PROXY outbound → MCInCloud:', JSON.stringify(outbound));
+    }
+    if (dry) {
+      return res.status(200).json({ ok: true, mode: 'dry-run', outbound });
+    }
+    // -------------------------------
+
+    // 6) Doorposten naar MCInCloud
     const r = await fetch('https://api.dev.mcincloud.com/api/v2/calls/enriched', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify(outbound)
     });
 
     const text = await r.text();
-    let json;
-    try { json = JSON.parse(text); } catch { /* non-JSON */ }
-
-    if (debug) {
-      console.log('MC status:', r.status, 'MC resp:', text);
-    }
-
-    if (json) return res.status(r.status).json(json);
-    return res.status(r.status).send(text || '');
+    try { return res.status(r.status).json(JSON.parse(text)); }
+    catch { return res.status(r.status).send(text || ''); }
 
   } catch (err) {
     return res.status(500).json({ error: String(err?.message || err) });
