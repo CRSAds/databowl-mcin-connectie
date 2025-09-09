@@ -63,17 +63,11 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: 'statusCallbackUrl moet absolute http(s) zijn.' });
     }
 
-    // 4) Identifiers ook als additionalData meesturen (vangnet)
-    const addData = {};
-    if (leadId  != null && String(leadId).trim()  !== '') addData.leadId  = String(leadId);
-    if (leadUid != null && String(leadUid).trim() !== '') addData.leadUid = String(leadUid);
-
-    // 5) Definitieve payload: flat schema
+   // 5) Definitieve payload: flat schema
     const outbound = {
       customerPhoneNumber: phone,
       statusCallbackUrl: cbUrl,
       statusCallbackMethod: cbMethod,
-      ...(Object.keys(addData).length ? { additionalData: addData } : {})
     };
 
     // Query toggles
