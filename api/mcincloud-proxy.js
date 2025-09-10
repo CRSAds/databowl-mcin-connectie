@@ -84,7 +84,7 @@ export default async function handler(req, res) {
     if (dry) return res.status(200).json({ ok: true, mode: 'dry-run', outbound });
 
     // 7) Post naar MCInCloud
-    const r = await fetch('https://api.dev.mcincloud.com/api/v2/calls/enriched', {
+    const r = await fetch('https://api.mcincloud.com/api/v2/calls/enriched', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
       body: JSON.stringify(outbound)
